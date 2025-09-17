@@ -313,6 +313,26 @@ class UCGStore:
         c.execute("CREATE INDEX IF NOT EXISTS idx_effects_type ON effects(effect_type);")
         c.execute("CREATE INDEX IF NOT EXISTS idx_effects_func ON effects(func_qname);")
 
+        # Anchors (Step 2 proto-OSigs)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS anchors(
+            anchor_id        INTEGER PRIMARY KEY,
+            effect_id        INTEGER,
+            file_rel         TEXT NOT NULL,
+            func_qname       TEXT,
+            kind             TEXT,       -- http_response, db_write, etc
+            raw_fields       TEXT,       -- JSON
+            anomalies        TEXT,       -- JSON
+            static_confidence REAL,
+            prov_file        TEXT,
+            prov_sl          INTEGER,
+            prov_el          INTEGER,
+            note             TEXT,
+            FOREIGN KEY(effect_id) REFERENCES effects(effect_id)
+        );""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_anchors_kind ON anchors(kind);")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_anchors_file ON anchors(file_rel);")
+
         con.commit()
 
     # ------------------------- Insert helpers ------------------------- #
@@ -432,6 +452,33 @@ class UCGStore:
                 json.dumps(e.raw_fields or {}),
                 e.prov.file_rel, e.prov.start_line, e.prov.end_line, e.prov.start_byte, e.prov.end_byte,
                 json.dumps(e.anomalies or []), e.note,
+            ),
+        )
+
+    def insert_anchor(self, cur, anchor) -> None:
+        import json
+        prov = anchor.prov
+        cur.execute(
+            """
+            INSERT OR REPLACE INTO anchors
+              (anchor_id, effect_id, file_rel, func_qname, kind,
+               raw_fields, anomalies, static_confidence,
+               prov_file, prov_sl, prov_el, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                anchor.anchor_id,
+                anchor.effect_id,
+                anchor.file_rel,
+                anchor.func_qname,
+                anchor.kind,
+                json.dumps(anchor.raw_fields),
+                json.dumps(anchor.anomalies),
+                anchor.static_confidence,
+                prov.file_rel if prov else None,
+                prov.start_line if prov else None,
+                prov.end_line if prov else None,
+                anchor.note,
             ),
         )
 
