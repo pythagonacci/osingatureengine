@@ -321,9 +321,11 @@ class UCGStore:
             file_rel         TEXT NOT NULL,
             func_qname       TEXT,
             kind             TEXT,       -- http_response, db_write, etc
-            raw_fields       TEXT,       -- JSON
+            raw_fields       TEXT,       -- JSON (from Step 2)
+            resolved_fields  TEXT,       -- JSON (from Step 3)
             anomalies        TEXT,       -- JSON
             static_confidence REAL,
+            confidence_static REAL,      -- Step 3 confidence
             prov_file        TEXT,
             prov_sl          INTEGER,
             prov_el          INTEGER,
@@ -462,9 +464,9 @@ class UCGStore:
             """
             INSERT OR REPLACE INTO anchors
               (anchor_id, effect_id, file_rel, func_qname, kind,
-               raw_fields, anomalies, static_confidence,
+               raw_fields, resolved_fields, anomalies, static_confidence, confidence_static,
                prov_file, prov_sl, prov_el, note)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 anchor.anchor_id,
@@ -473,8 +475,10 @@ class UCGStore:
                 anchor.func_qname,
                 anchor.kind,
                 json.dumps(anchor.raw_fields),
+                json.dumps(getattr(anchor, 'resolved_fields', {})),
                 json.dumps(anchor.anomalies),
                 anchor.static_confidence,
+                getattr(anchor, 'confidence_static', None),
                 prov.file_rel if prov else None,
                 prov.start_line if prov else None,
                 prov.end_line if prov else None,
