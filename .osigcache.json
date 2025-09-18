@@ -1,10 +1,10 @@
 {
   "app.py": {
-    "abs_locator": "file:///private/var/folders/4q/sv51r4n10x18zk283w50hg480000gn/T/pytest-of-amnaahmad/pytest-17/test_build_ucg_on_small_python0/repo/app.py",
-    "content_hash": "de580dd12e72615315ed58024911a299",
-    "file_id": "app.py:de580dd1",
+    "abs_locator": "file:///private/var/folders/4q/sv51r4n10x18zk283w50hg480000gn/T/pytest-of-amnaahmad/pytest-22/test_static_miner_runs0/repo/app.py",
+    "content_hash": "e81578abd8339aab4d15cf1b21b19aae",
+    "file_id": "app.py:e81578ab",
     "language": "python",
-    "mtime": 1758141685.6729956,
-    "size_bytes": 103
+    "mtime": 1758220574.908131,
+    "size_bytes": 51
   }
 }

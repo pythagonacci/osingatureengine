@@ -18,6 +18,9 @@ class StaticMiner:
         """
         Entry point: load effects from Step 1 store,
         dispatch to detectors, and persist anchors.
+        
+        Returns:
+            Dictionary with mining statistics
         """
         effects = self.store.list_effects()
         anchors: List[Anchor] = []
@@ -46,6 +49,12 @@ class StaticMiner:
             for a in anchors:
                 self.store.insert_anchor(cur, a)
             con.commit()
+        
+        return {
+            "effects_processed": len(effects),
+            "anchors_created": len(anchors),
+            "total_effects": len(effects)
+        }
 
     def _alloc_id(self) -> int:
         aid = self._next_anchor_id

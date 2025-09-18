@@ -335,6 +335,19 @@ class UCGStore:
         c.execute("CREATE INDEX IF NOT EXISTS idx_anchors_kind ON anchors(kind);")
         c.execute("CREATE INDEX IF NOT EXISTS idx_anchors_file ON anchors(file_rel);")
 
+        # Context Packs (Step 4 - LLM input preparation)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS context_packs(
+            pack_id          INTEGER PRIMARY KEY,
+            anchor_id        INTEGER NOT NULL,
+            bundle           TEXT NOT NULL,       -- JSON context bundle
+            size_bytes       INTEGER,
+            created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(anchor_id) REFERENCES anchors(anchor_id)
+        );""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_context_packs_anchor ON context_packs(anchor_id);")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_context_packs_size ON context_packs(size_bytes);")
+
         con.commit()
 
     # ------------------------- Insert helpers ------------------------- #
