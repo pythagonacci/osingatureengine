@@ -16,6 +16,16 @@ class Config:
     resolve_config_files: bool = True
     constant_propagation_limit: int = 1000
     
+    # LLM settings
+    llm_provider: str = "openai"
+    llm_model: str = "gpt-4"
+    llm_api_key: Optional[str] = None
+    llm_base_url: Optional[str] = None
+    llm_timeout: int = 30
+    llm_max_retries: int = 3
+    llm_temperature: float = 0.1
+    llm_max_tokens: int = 2048
+    
     # General settings
     debug: bool = False
     verbose: bool = False

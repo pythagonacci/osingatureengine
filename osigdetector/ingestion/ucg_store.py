@@ -348,6 +348,28 @@ class UCGStore:
         c.execute("CREATE INDEX IF NOT EXISTS idx_context_packs_anchor ON context_packs(anchor_id);")
         c.execute("CREATE INDEX IF NOT EXISTS idx_context_packs_size ON context_packs(size_bytes);")
 
+        # OSigs (Step 5 - LLM enriched operational signatures)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS osigs(
+            osig_id          INTEGER PRIMARY KEY,
+            anchor_id        INTEGER NOT NULL,
+            kind             TEXT NOT NULL,
+            fields           TEXT NOT NULL,       -- JSON
+            data_atoms       TEXT,                -- JSON array
+            joins            TEXT,                -- JSON
+            summary          TEXT NOT NULL,
+            citations        TEXT NOT NULL,       -- JSON array
+            llm_confidence   REAL NOT NULL,
+            anomalies        TEXT,                -- JSON array
+            hypothesis       BOOLEAN DEFAULT 0,
+            created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(anchor_id) REFERENCES anchors(anchor_id)
+        );""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_osigs_anchor ON osigs(anchor_id);")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_osigs_kind ON osigs(kind);")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_osigs_confidence ON osigs(llm_confidence);")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_osigs_hypothesis ON osigs(hypothesis);")
+
         con.commit()
 
     # ------------------------- Insert helpers ------------------------- #

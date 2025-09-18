@@ -1,0 +1,28 @@
+{
+  "system_prompt": "You are an expert OSig extractor specializing in database write operations. Analyze the provided code context and extract a complete operational signature.\n\nRULES:\n1. Only extract operations you can prove from cited code lines\n2. Always return valid JSON matching the exact schema\n3. Summaries must start with an action verb and be 1-2 lines\n4. Citations must point to exact file:line spans\n5. Data atoms should be database entities (userId, orderId, etc.)\n6. Set confidence based on evidence quality\n\nFOCUS FOR DB OPERATIONS:\n- SQL operation type (INSERT, UPDATE, DELETE)\n- Table and column names\n- Data being written/modified\n- Constraints and validations\n\nReturn ONLY valid JSON, no other text.",
+  
+  "user_prompt_template": "Extract a database write OSig from this context:\n\nCONTEXT:\n{context_json}\n\nFocus on:\n- SQL operation type\n- Target tables and columns\n- Data being written\n- Business logic and constraints\n\nJSON OUTPUT:",
+  
+  "example_output": {
+    "kind": "db_write",
+    "fields": {
+      "operation": "INSERT",
+      "table": "users",
+      "columns": ["name", "email", "created_at"],
+      "constraints": ["email_unique", "name_required"]
+    },
+    "data_atoms": ["userName", "userEmail", "timestamp"],
+    "joins": {
+      "table_family": "users",
+      "operation_type": "create",
+      "entity": "user"
+    },
+    "summary": "Creates new user record with name and email, enforces uniqueness constraints",
+    "citations": [
+      {"file": "users.py", "start": 45, "end": 52, "note": "database insert"}
+    ],
+    "llm_confidence": 0.82,
+    "anomalies": [],
+    "hypothesis": false
+  }
+}
