@@ -24,6 +24,10 @@ class AnomalyType(Enum):
     PARTIAL_PARSE = auto()
     INCREMENTAL_PARSE_ERROR = auto()
     ENCODING_ERROR = auto()
+    READ_ERROR = auto()
+    PATHOLOGICAL_FILE = auto()
+    CAPTURE_TRUNCATED = auto()
+    WORKER_RLIMIT_UNAVAILABLE = auto()
 
 
 class Language(Enum):
