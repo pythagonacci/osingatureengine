@@ -1,5 +1,8 @@
 # provis_ucg/binding/resolver.py
 from __future__ import annotations
+
+import hashlib
+
 # -----------------------------------------------------------------------------
 # Binding & Scopes (Step 1 fast pass) — Production-hardened
 #
@@ -18,23 +21,15 @@ from __future__ import annotations
 #   - Parent-child scope by byte-interval containment
 #   - Sorted, content-addressed edge ids
 # -----------------------------------------------------------------------------
-
 import re
-import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Callable
 
-from ..models import (
-    Anomaly,
-    AnomalyType,
-    Language,
-    Severity,
-)
-from ..normalize.lift import (
-    UCGNode, UCGEdge, Span, SemanticType,
-)
+from ..models import Anomaly, AnomalyType, Language, Severity
+from ..normalize.lift import SemanticType, Span, UCGEdge, UCGNode
 
 # ============================== Edge helpers ==================================
+
 
 def _sha256_hex(*parts: str) -> str:
     h = hashlib.sha256()
@@ -43,14 +38,24 @@ def _sha256_hex(*parts: str) -> str:
         h.update(b"\0")
     return h.hexdigest()
 
+
 def _span_key(sp: Span) -> str:
     return f"{sp.path}:{sp.byte_start}-{sp.byte_end}"
+
 
 def _edge_id(kind: str, src: str, dst: str, sp: Span) -> str:
     return _sha256_hex("edge", kind, src, dst, _span_key(sp))[:24]
 
-def _mk_edge(kind: str, src_id: str, dst_id: str, sp: Span,
-             flags: List[str], confidence: float, reason_label: str) -> UCGEdge:
+
+def _mk_edge(
+    kind: str,
+    src_id: str,
+    dst_id: str,
+    sp: Span,
+    flags: list[str],
+    confidence: float,
+    reason_label: str,
+) -> UCGEdge:
     return UCGEdge(
         edge_id=_edge_id(kind, src_id, dst_id, sp),
         kind=kind,
@@ -62,48 +67,58 @@ def _mk_edge(kind: str, src_id: str, dst_id: str, sp: Span,
         reason_label=reason_label,
     )
 
+
 # ============================== Data structures ===============================
+
 
 @dataclass
 class ScopeEntry:
     """A symbol declared in a scope."""
+
     name: str
     node_id: str
     sem: SemanticType  # CLASS / FUNCTION / METHOD / SYMBOL (defs)
     qname: str
 
+
 @dataclass
 class ScopeFrame:
     """Lexical scope with byte interval for containment checks."""
+
     name: str
     node_id: str
     sem: SemanticType
     span: Span
-    parent_idx: Optional[int]    # index into frames, or None for module
+    parent_idx: int | None  # index into frames, or None for module
     qname: str
-    symbols: Dict[str, ScopeEntry]  # by simple name
+    symbols: dict[str, ScopeEntry]  # by simple name
+
 
 @dataclass
 class ImportBinding:
     """Conservative parse of one import binding."""
-    source: Optional[str]          # module/package path (if visible)
-    imported_name: Optional[str]   # "foo" in "from x import foo" / "default" / "*"
-    alias: Optional[str]           # "bar" in "import x as bar" or "{foo as bar}"
-    kind: str                      # 'default' | 'named' | 'namespace' | 'star' | 'module'
-    is_type_only: bool             # TS 'import type'
+
+    source: str | None  # module/package path (if visible)
+    imported_name: str | None  # "foo" in "from x import foo" / "default" / "*"
+    alias: str | None  # "bar" in "import x as bar" or "{foo as bar}"
+    kind: str  # 'default' | 'named' | 'namespace' | 'star' | 'module'
+    is_type_only: bool  # TS 'import type'
     span: Span
     reason: str
 
+
 @dataclass
 class BindingResult:
-    edges: List[UCGEdge]
-    alias_index: Dict[str, str]    # alias simple name -> canonical symbol node_id (placeholder id)
-    anomalies: List[Anomaly]
-    metrics: Dict[str, int]
+    edges: list[UCGEdge]
+    alias_index: dict[str, str]  # alias simple name -> canonical symbol node_id (placeholder id)
+    anomalies: list[Anomaly]
+    metrics: dict[str, int]
+
 
 # ============================== Public API ====================================
 
-def build_scopes_and_symbols(nodes: List[UCGNode], *, language: Language) -> List[ScopeFrame]:
+
+def build_scopes_and_symbols(nodes: list[UCGNode], *, language: Language) -> list[ScopeFrame]:
     """
     Build lexical scopes from UCG definition nodes for a single file.
     Order: sort by (start, -end), then assign parent by containment.
@@ -113,7 +128,7 @@ def build_scopes_and_symbols(nodes: List[UCGNode], *, language: Language) -> Lis
         return []
     module = module_nodes[0]
     mspan = module.spans[0]
-    frames: List[ScopeFrame] = [
+    frames: list[ScopeFrame] = [
         ScopeFrame(
             name=module.name or "<module>",
             node_id=module.node_id,
@@ -125,9 +140,13 @@ def build_scopes_and_symbols(nodes: List[UCGNode], *, language: Language) -> Lis
         )
     ]
 
-    definers = [n for n in nodes if n.semantic_type in (SemanticType.CLASS, SemanticType.FUNCTION, SemanticType.METHOD)]
+    definers = [
+        n
+        for n in nodes
+        if n.semantic_type in (SemanticType.CLASS, SemanticType.FUNCTION, SemanticType.METHOD)
+    ]
     order = sorted(definers, key=lambda n: (n.spans[0].byte_start, -n.spans[0].byte_end))
-    stack: List[int] = [0]  # indices into frames (module at 0)
+    stack: list[int] = [0]  # indices into frames (module at 0)
 
     for n in order:
         sp = n.spans[0]
@@ -149,17 +168,20 @@ def build_scopes_and_symbols(nodes: List[UCGNode], *, language: Language) -> Lis
 
         simple = n.name or "<anonymous>"
         if simple not in parent.symbols:
-            parent.symbols[simple] = ScopeEntry(name=simple, node_id=n.node_id, sem=n.semantic_type, qname=frame.qname)
+            parent.symbols[simple] = ScopeEntry(
+                name=simple, node_id=n.node_id, sem=n.semantic_type, qname=frame.qname
+            )
 
     return frames
 
+
 def resolve_aliases_and_imports(
-    nodes: List[UCGNode],
-    frames: List[ScopeFrame],
+    nodes: list[UCGNode],
+    frames: list[ScopeFrame],
     *,
     language: Language,
-    typed_hints: Optional[Dict] = None,
-    get_source_slice: Optional[Callable[[str, int, int], str]] = None,  # (path, b0, b1) -> exact source
+    typed_hints: dict | None = None,
+    get_source_slice: Callable[[str, int, int], str] | None = None,
 ) -> BindingResult:
     """
     Resolve imports and aliases conservatively using IMPORT node previews/spans.
@@ -168,10 +190,12 @@ def resolve_aliases_and_imports(
       - edges(kind='aliases'): local alias symbol -> canonical symbol
       - edges(kind='references'): symbol occurrences -> nearest local definition
     """
-    anomalies: List[Anomaly] = []
-    edges: List[UCGEdge] = []
-    alias_index: Dict[str, str] = {}
-    metrics = dict(imports_seen=0, imports_resolved=0, imports_partial=0, alias_edges=0, local_refs=0)
+    anomalies: list[Anomaly] = []
+    edges: list[UCGEdge] = []
+    alias_index: dict[str, str] = {}
+    metrics = dict(
+        imports_seen=0, imports_resolved=0, imports_partial=0, alias_edges=0, local_refs=0
+    )
 
     module = next((f for f in frames if f.sem == SemanticType.MODULE), None)
     if not module:
@@ -194,51 +218,109 @@ def resolve_aliases_and_imports(
                 pass
 
         if not bset:
-            anomalies.append(Anomaly(
-                path=sp.path, blob_sha256="",
-                typ=AnomalyType.UNCERTAIN_BINDING, severity=Severity.WARN,
-                reason_detail=f"Unparsed import preview for {language.value}"
-            ))
+            anomalies.append(
+                Anomaly(
+                    path=sp.path,
+                    blob_sha256="",
+                    typ=AnomalyType.UNCERTAIN_BINDING,
+                    severity=Severity.WARN,
+                    reason_detail=f"Unparsed import preview for {language.value}",
+                )
+            )
             continue
 
         for b in bset:
             canonical_key = f"{b.source or '<external>'}::{b.imported_name or '*'}"
             canonical_sym_id = _symbol_id_for_canonical(module.qname, canonical_key)
 
+            # Star import anomaly
+            if b.kind == "star" and language == Language.PYTHON:
+                anomalies.append(
+                    Anomaly(
+                        path=sp.path,
+                        blob_sha256="",
+                        typ=AnomalyType.UNCERTAIN_BINDING,
+                        severity=Severity.WARN,
+                        reason_detail="from ... import *",
+                    )
+                )
+
             alias_name = b.alias or b.imported_name
             if alias_name:
                 alias_index.setdefault(alias_name, canonical_sym_id)
-                edges.append(_mk_edge(
-                    kind="aliases",
-                    src_id=_symbol_id_for_alias(module.qname, alias_name),
-                    dst_id=canonical_sym_id,
-                    sp=b.span,
-                    flags=["RESOLVED" if b.source else "PARTIAL"],
-                    confidence=1.0 if b.source else 0.6,
-                    reason_label=b.reason,
-                ))
+
+                # Register alias in module scope for local reference resolution
+                module.symbols.setdefault(
+                    alias_name,
+                    ScopeEntry(
+                        name=alias_name,
+                        node_id=_symbol_id_for_alias(module.qname, alias_name),
+                        sem=SemanticType.SYMBOL,
+                        qname=f"{module.qname}::{alias_name}",
+                    ),
+                )
+
+                # Improved confidence and flags
+                edge_flags = ["RESOLVED" if b.source else "PARTIAL"]
+                if getattr(b, "is_type_only", False):
+                    edge_flags.append("TYPE_ONLY")
+                edge_conf = (
+                    1.0
+                    if b.source and not getattr(b, "is_type_only", False)
+                    else (0.8 if getattr(b, "is_type_only", False) else 0.6)
+                )
+
+                edges.append(
+                    _mk_edge(
+                        kind="aliases",
+                        src_id=_symbol_id_for_alias(module.qname, alias_name),
+                        dst_id=canonical_sym_id,
+                        sp=b.span,
+                        flags=edge_flags,
+                        confidence=edge_conf,
+                        reason_label=b.reason,
+                    )
+                )
                 metrics["imports_resolved"] += 1
                 metrics["alias_edges"] += 1
             else:
                 metrics["imports_partial"] += 1
-                anomalies.append(Anomaly(
-                    path=sp.path, blob_sha256="",
-                    typ=AnomalyType.UNCERTAIN_BINDING, severity=Severity.WARN,
-                    reason_detail=f"Import without alias/name: {b.reason}"
-                ))
+                anomalies.append(
+                    Anomaly(
+                        path=sp.path,
+                        blob_sha256="",
+                        typ=AnomalyType.UNCERTAIN_BINDING,
+                        severity=Severity.WARN,
+                        reason_detail=f"Import without alias/name: {b.reason}",
+                    )
+                )
 
-            edges.append(_mk_edge(
-                kind="imports",
-                src_id=imp.node_id,
-                dst_id=canonical_sym_id,
-                sp=b.span,
-                flags=["RESOLVED" if b.source else "PARTIAL"],
-                confidence=1.0 if b.source else 0.6,
-                reason_label=b.reason,
-            ))
+            # Apply same flags to imports edge
+            import_edge_flags = ["RESOLVED" if b.source else "PARTIAL"]
+            if getattr(b, "is_type_only", False):
+                import_edge_flags.append("TYPE_ONLY")
+            import_edge_conf = (
+                1.0
+                if b.source and not getattr(b, "is_type_only", False)
+                else (0.8 if getattr(b, "is_type_only", False) else 0.6)
+            )
+
+            edges.append(
+                _mk_edge(
+                    kind="imports",
+                    src_id=imp.node_id,
+                    dst_id=canonical_sym_id,
+                    sp=b.span,
+                    flags=import_edge_flags,
+                    confidence=import_edge_conf,
+                    reason_label=b.reason,
+                )
+            )
 
     # --- Best-effort local references (symbols used that match local-def names) ---
-    symbol_occurrences = [n for n in nodes if n.semantic_type == SemanticType.SYMBOL and n.raw_type == "symbol"]
+    symbol_occurrences = [
+        n for n in nodes if n.semantic_type == SemanticType.SYMBOL and n.raw_type == "symbol"
+    ]
     def_lookup = _build_def_lookup(frames)
     for sym in symbol_occurrences:
         sp = sym.spans[0]
@@ -247,44 +329,53 @@ def resolve_aliases_and_imports(
             continue
         target = _nearest_def(def_lookup, frames, sp, name)
         if target:
-            edges.append(_mk_edge(
-                kind="references",
-                src_id=sym.node_id,
-                dst_id=target.node_id,
-                sp=sp,
-                flags=["RESOLVED"],
-                confidence=0.9,
-                reason_label="scope:nearest_def",
-            ))
+            edges.append(
+                _mk_edge(
+                    kind="references",
+                    src_id=sym.node_id,
+                    dst_id=target.node_id,
+                    sp=sp,
+                    flags=["RESOLVED"],
+                    confidence=0.9,
+                    reason_label="scope:nearest_def",
+                )
+            )
             metrics["local_refs"] += 1
 
     edges.sort(key=lambda e: (e.kind, e.src_id, e.dst_id, e.spans[0].byte_start if e.spans else 0))
+    anomalies.sort(key=lambda a: (a.path, a.typ.name, a.reason_detail))
     return BindingResult(edges=edges, alias_index=alias_index, anomalies=anomalies, metrics=metrics)
 
+
 # ============================== Utilities =====================================
+
 
 def _encloses(outer: Span, inner: Span) -> bool:
     return (outer.byte_start <= inner.byte_start) and (outer.byte_end >= inner.byte_end)
 
-def _build_def_lookup(frames: List[ScopeFrame]) -> Dict[str, List[ScopeEntry]]:
-    lut: Dict[str, List[ScopeEntry]] = {}
+
+def _build_def_lookup(frames: list[ScopeFrame]) -> dict[str, list[ScopeEntry]]:
+    lut: dict[str, list[ScopeEntry]] = {}
     for fr in frames:
         for name, sym in fr.symbols.items():
             lut.setdefault(name, []).append(sym)
     return lut
 
-def _nearest_def(lut: Dict[str, List[ScopeEntry]], frames: List[ScopeFrame], sp: Span, name: str) -> Optional[ScopeEntry]:
+
+def _nearest_def(
+    lut: dict[str, list[ScopeEntry]], frames: list[ScopeFrame], sp: Span, name: str
+) -> ScopeEntry | None:
     cands = lut.get(name)
     if not cands:
         return None
-    ranked: List[Tuple[int, ScopeEntry]] = []
+    ranked: list[tuple[int, ScopeEntry]] = []
     for idx, fr in enumerate(frames):
         if name in fr.symbols and _encloses(fr.span, sp):
             depth = _depth(frames, idx)
             ranked.append((depth, fr.symbols[name]))
     if not ranked:
         # fallback to module-level if present
-        for idx, fr in enumerate(frames):
+        for _idx, fr in enumerate(frames):
             if fr.parent_idx is None and name in fr.symbols:
                 ranked.append((0, fr.symbols[name]))
     if not ranked:
@@ -292,7 +383,8 @@ def _nearest_def(lut: Dict[str, List[ScopeEntry]], frames: List[ScopeFrame], sp:
     ranked.sort(key=lambda t: -t[0])  # prefer deepest enclosing
     return ranked[0][1]
 
-def _depth(frames: List[ScopeFrame], idx: int) -> int:
+
+def _depth(frames: list[ScopeFrame], idx: int) -> int:
     d = 0
     j = idx
     while j is not None:
@@ -300,22 +392,27 @@ def _depth(frames: List[ScopeFrame], idx: int) -> int:
         d += 1
     return d
 
+
 # -------- Alias/canonical symbol identity (within-file placeholders) ----------
+
 
 def _symbol_id_for_alias(module_qname: str, alias_name: str) -> str:
     return _sha256_hex("sym", "alias", module_qname, alias_name)[:24]
 
+
 def _symbol_id_for_canonical(module_qname: str, canonical_key: str) -> str:
     return _sha256_hex("sym", "canonical", module_qname, canonical_key)[:24]
+
 
 # ============================== Import parsing (hardened) =====================
 
 # Balanced split helpers (respect () [] {} <> nesting)
 _BRACKETS_OPEN = "([{<"
 _BRACKETS_CLOSE = ")]}>"
-_PAIR = dict(zip(_BRACKETS_OPEN, _BRACKETS_CLOSE))
+_PAIR = dict(zip(_BRACKETS_OPEN, _BRACKETS_CLOSE, strict=False))
 
-def _split_top_level_balanced(s: str, sep: str = ",") -> List[str]:
+
+def _split_top_level_balanced(s: str, sep: str = ",") -> list[str]:
     out, buf = [], []
     stack = []
     i, L = 0, len(s)
@@ -338,7 +435,8 @@ def _split_top_level_balanced(s: str, sep: str = ",") -> List[str]:
         out.append("".join(buf).strip())
     return [p for p in out if p]
 
-def _find_all_import_chunks_py(snippet: str) -> List[str]:
+
+def _find_all_import_chunks_py(snippet: str) -> list[str]:
     chunks = []
     for raw in re.split(r"[;\n]+", snippet):
         t = raw.strip()
@@ -346,7 +444,8 @@ def _find_all_import_chunks_py(snippet: str) -> List[str]:
             chunks.append(t)
     return chunks
 
-def _find_all_import_chunks_ts(snippet: str) -> List[str]:
+
+def _find_all_import_chunks_ts(snippet: str) -> list[str]:
     chunks = []
     text = " ".join(snippet.strip().split())
     for part in re.split(r";", text):
@@ -355,28 +454,56 @@ def _find_all_import_chunks_ts(snippet: str) -> List[str]:
             chunks.append(t)
     return chunks
 
+
 # Python
-def _parse_py_import(preview: str, sp: Span) -> List[ImportBinding]:
-    res: List[ImportBinding] = []
+def _parse_py_import(preview: str, sp: Span) -> list[ImportBinding]:
+    res: list[ImportBinding] = []
     for chunk in _find_all_import_chunks_py(preview):
-        m_from = re.match(r"^from\s+([A-Za-z0-9_\.]+)\s+import\s+(.+)$", chunk)
+        m_from = re.match(r"^from\s+(\.*[A-Za-z0-9_\.]*)\s+import\s+(.+)$", chunk)
         if m_from:
             source = m_from.group(1)
             body = m_from.group(2).strip()
             parts = _split_top_level_balanced(body, ",")
             for p in parts:
                 if p == "*":
-                    res.append(ImportBinding(source=source, imported_name="*", alias=None,
-                                             kind="star", is_type_only=False, span=sp, reason="py:from_import"))
+                    res.append(
+                        ImportBinding(
+                            source=source,
+                            imported_name="*",
+                            alias=None,
+                            kind="star",
+                            is_type_only=False,
+                            span=sp,
+                            reason="py:from_import",
+                        )
+                    )
                     continue
                 if " as " in p:
                     name, alias = p.split(" as ", 1)
-                    res.append(ImportBinding(source=source, imported_name=name.strip(), alias=alias.strip(),
-                                             kind="named", is_type_only=False, span=sp, reason="py:from_import_as"))
+                    res.append(
+                        ImportBinding(
+                            source=source,
+                            imported_name=name.strip(),
+                            alias=alias.strip(),
+                            kind="named",
+                            is_type_only=False,
+                            span=sp,
+                            reason="py:from_import_as",
+                        )
+                    )
                 else:
                     name = p.strip()
-                    res.append(ImportBinding(source=source, imported_name=name, alias=name,
-                                             kind="named", is_type_only=False, span=sp, reason="py:from_import"))
+                    res.append(
+                        ImportBinding(
+                            source=source,
+                            imported_name=name,
+                            alias=name,
+                            kind="named",
+                            is_type_only=False,
+                            span=sp,
+                            reason="py:from_import",
+                        )
+                    )
             continue
 
         m_imp = re.match(r"^import\s+(.+)$", chunk)
@@ -386,19 +513,132 @@ def _parse_py_import(preview: str, sp: Span) -> List[ImportBinding]:
             for p in parts:
                 if " as " in p:
                     name, alias = p.split(" as ", 1)
-                    res.append(ImportBinding(source=name.strip(), imported_name=None, alias=alias.strip(),
-                                             kind="module", is_type_only=False, span=sp, reason="py:import_as"))
+                    res.append(
+                        ImportBinding(
+                            source=name.strip(),
+                            imported_name=None,
+                            alias=alias.strip(),
+                            kind="module",
+                            is_type_only=False,
+                            span=sp,
+                            reason="py:import_as",
+                        )
+                    )
                 else:
                     name = p.strip()
-                    res.append(ImportBinding(source=name, imported_name=None, alias=name,
-                                             kind="module", is_type_only=False, span=sp, reason="py:import"))
+                    res.append(
+                        ImportBinding(
+                            source=name,
+                            imported_name=None,
+                            alias=name,
+                            kind="module",
+                            is_type_only=False,
+                            span=sp,
+                            reason="py:import",
+                        )
+                    )
     return res
+
 
 # TS/JS
 _TS_IMPORT_TYPE_RE = re.compile(r"\bimport\s+type\b", re.IGNORECASE)
+_CJS_REQUIRE_RE = re.compile(
+    r"""^(?:const|let|var)\s+
+        (?P<lhs>[\w$\s{},:]+)
+        \s*=\s*
+        require\(\s*["'](?P<src>[^"']+)["']\s*\)
+        """,
+    re.VERBOSE,
+)
+_DYN_IMPORT_RE = re.compile(r"""\bimport\s*\(\s*["']([^"']+)["']\s*\)""")
 
-def _parse_ts_js_import(preview: str, sp: Span) -> List[ImportBinding]:
-    res: List[ImportBinding] = []
+
+def _parse_commonjs_and_dynamic(
+    snippet: str, sp: Span
+) -> tuple[list[ImportBinding], list[Anomaly]]:
+    res: list[ImportBinding] = []
+    anomalies: list[Anomaly] = []
+    text = " ".join(snippet.strip().split())
+    # Dynamic import(...) — mark but keep a partial import
+    for m in _DYN_IMPORT_RE.finditer(text):
+        src = m.group(1)
+        res.append(
+            ImportBinding(
+                source=src,
+                imported_name="*",
+                alias=None,
+                kind="star",
+                is_type_only=False,
+                span=sp,
+                reason="js:dynamic_import",
+            )
+        )
+        anomalies.append(
+            Anomaly(
+                path=sp.path,
+                blob_sha256="",
+                typ=AnomalyType.DYNAMIC_IMPORT,
+                severity=Severity.WARN,
+                reason_detail=f"dynamic import('{src}')",
+            )
+        )
+    # CJS require(...)
+    m = _CJS_REQUIRE_RE.match(text)
+    if m:
+        src = m.group("src")
+        lhs = m.group("lhs").strip()
+        if lhs.startswith("{") and lhs.endswith("}"):
+            # destructured names: { a, b: c }
+            inner = lhs[1:-1].strip()
+            for part in _split_top_level_balanced(inner, ","):
+                part = part.strip()
+                if not part:
+                    continue
+                if ":" in part:
+                    name, alias = (t.strip() for t in part.split(":", 1))
+                    res.append(
+                        ImportBinding(
+                            source=src,
+                            imported_name=name,
+                            alias=alias,
+                            kind="named",
+                            is_type_only=False,
+                            span=sp,
+                            reason="cjs:named_as",
+                        )
+                    )
+                else:
+                    name = part
+                    res.append(
+                        ImportBinding(
+                            source=src,
+                            imported_name=name,
+                            alias=name,
+                            kind="named",
+                            is_type_only=False,
+                            span=sp,
+                            reason="cjs:named",
+                        )
+                    )
+        else:
+            # simple: const foo = require('pkg')
+            alias = lhs.split()[0]
+            res.append(
+                ImportBinding(
+                    source=src,
+                    imported_name=None,
+                    alias=alias,
+                    kind="module",
+                    is_type_only=False,
+                    span=sp,
+                    reason="cjs:module",
+                )
+            )
+    return res, anomalies
+
+
+def _parse_ts_js_import(preview: str, sp: Span) -> list[ImportBinding]:
+    res: list[ImportBinding] = []
     for chunk in _find_all_import_chunks_ts(preview):
         is_type_only = bool(_TS_IMPORT_TYPE_RE.search(chunk))
 
@@ -406,8 +646,17 @@ def _parse_ts_js_import(preview: str, sp: Span) -> List[ImportBinding]:
         m_bare = re.match(r'^import\s+["\']([^"\']+)["\']$', chunk)
         if m_bare:
             src = m_bare.group(1)
-            res.append(ImportBinding(source=src, imported_name="*", alias=None, kind="star",
-                                     is_type_only=is_type_only, span=sp, reason="ts:bare_import"))
+            res.append(
+                ImportBinding(
+                    source=src,
+                    imported_name="*",
+                    alias=None,
+                    kind="star",
+                    is_type_only=is_type_only,
+                    span=sp,
+                    reason="ts:bare_import",
+                )
+            )
             continue
 
         # import <clause> from "module"
@@ -420,10 +669,19 @@ def _parse_ts_js_import(preview: str, sp: Span) -> List[ImportBinding]:
         source = m_from.group(2).strip()
 
         # Namespace: * as ns
-        m_ns = re.match(r'^\*\s+as\s+([A-Za-z_$][\w$]*)$', clause)
+        m_ns = re.match(r"^\*\s+as\s+([A-Za-z_$][\w$]*)$", clause)
         if m_ns:
-            res.append(ImportBinding(source=source, imported_name="*", alias=m_ns.group(1),
-                                     kind="namespace", is_type_only=is_type_only, span=sp, reason="ts:namespace"))
+            res.append(
+                ImportBinding(
+                    source=source,
+                    imported_name="*",
+                    alias=m_ns.group(1),
+                    kind="namespace",
+                    is_type_only=is_type_only,
+                    span=sp,
+                    reason="ts:namespace",
+                )
+            )
             continue
 
         # Default (maybe followed by named)
@@ -434,8 +692,17 @@ def _parse_ts_js_import(preview: str, sp: Span) -> List[ImportBinding]:
                 default_name = default_name.strip()
                 named_tail = named_tail.strip()
             if default_name:
-                res.append(ImportBinding(source=source, imported_name="default", alias=default_name,
-                                         kind="default", is_type_only=is_type_only, span=sp, reason="ts:default"))
+                res.append(
+                    ImportBinding(
+                        source=source,
+                        imported_name="default",
+                        alias=default_name,
+                        kind="default",
+                        is_type_only=is_type_only,
+                        span=sp,
+                        reason="ts:default",
+                    )
+                )
             clause = named_tail or ""
 
         # Named: { a, b as c }
@@ -449,15 +716,40 @@ def _parse_ts_js_import(preview: str, sp: Span) -> List[ImportBinding]:
                     continue
                 if " as " in p:
                     name, alias = p.split(" as ", 1)
-                    res.append(ImportBinding(source=source, imported_name=name.strip(), alias=alias.strip(),
-                                             kind="named", is_type_only=is_type_only, span=sp, reason="ts:named_as"))
+                    res.append(
+                        ImportBinding(
+                            source=source,
+                            imported_name=name.strip(),
+                            alias=alias.strip(),
+                            kind="named",
+                            is_type_only=is_type_only,
+                            span=sp,
+                            reason="ts:named_as",
+                        )
+                    )
                 else:
                     name = p.strip()
-                    res.append(ImportBinding(source=source, imported_name=name, alias=name,
-                                             kind="named", is_type_only=is_type_only, span=sp, reason="ts:named"))
+                    res.append(
+                        ImportBinding(
+                            source=source,
+                            imported_name=name,
+                            alias=name,
+                            kind="named",
+                            is_type_only=is_type_only,
+                            span=sp,
+                            reason="ts:named",
+                        )
+                    )
+
+    # Add CJS/dynamic scan as a second pass
+    cjs, _an = _parse_commonjs_and_dynamic(preview, sp)
+    res.extend(cjs)
     return res
 
-def _imports_from_preview(preview: str, language: Language, sp: Span, raw_kind: str) -> List[ImportBinding]:
+
+def _imports_from_preview(
+    preview: str, language: Language, sp: Span, raw_kind: str
+) -> list[ImportBinding]:
     if language == Language.PYTHON:
         return _parse_py_import(preview, sp)
     else:

@@ -28,6 +28,8 @@ class AnomalyType(Enum):
     PATHOLOGICAL_FILE = auto()
     CAPTURE_TRUNCATED = auto()
     WORKER_RLIMIT_UNAVAILABLE = auto()
+    UNCERTAIN_BINDING = auto()
+    DYNAMIC_IMPORT = auto()
 
 
 class Language(Enum):
