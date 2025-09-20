@@ -1,10 +1,14 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional
+
 
 class Severity(Enum):
-    INFO = "INFO"; WARN = "WARN"; ERROR = "ERROR"
+    INFO = "INFO"
+    WARN = "WARN"
+    ERROR = "ERROR"
+
 
 class AnomalyType(Enum):
     SYMLINK_TRAVERSED = auto()
@@ -14,17 +18,28 @@ class AnomalyType(Enum):
     VENDORED_CODE = auto()
     FILE_TOO_LARGE = auto()
     PERMISSION_DENIED = auto()
+    # NEW for parser layer:
+    PARSE_ERROR = auto()
+    PARSE_TIMEOUT = auto()
+    PARTIAL_PARSE = auto()
+    INCREMENTAL_PARSE_ERROR = auto()
+    ENCODING_ERROR = auto()
+
 
 class Language(Enum):
-    PYTHON = "python"; JAVASCRIPT = "javascript"; TYPESCRIPT = "typescript"
+    PYTHON = "python"
+    JAVASCRIPT = "javascript"
+    TYPESCRIPT = "typescript"
+
 
 @dataclass
 class Anomaly:
     path: str
-    blob_sha256: Optional[str]
+    blob_sha256: str | None
     typ: AnomalyType
     severity: Severity
     reason_detail: str
+
 
 @dataclass
 class DiscoveredFile:
