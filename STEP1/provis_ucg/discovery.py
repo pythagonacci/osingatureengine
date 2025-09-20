@@ -140,14 +140,28 @@ def discover_files(
         "skipped_generated": 0,
         "skipped_deny_glob": 0,
         "skipped_not_allowed": 0,
+        "skipped_unsupported": 0,
+        "unreadable": 0,
         "symlink_traversed": 0,
         "symlink_out_of_root": 0,
         "oversize": 0,
         "parse_candidates": 0,  # synonym for supported
     }
 
+    def _on_walk_error(err: OSError):
+        # Capture directory-level errors deterministically
+        anomalies.append(
+            Anomaly(
+                path=getattr(err, 'filename', str(root)),
+                blob_sha256=None,
+                typ=AnomalyType.PERMISSION_DENIED,
+                severity=Severity.ERROR,
+                reason_detail=f"os.walk error: {err.__class__.__name__}",
+            )
+        )
+
     # Deterministic traversal: os.walk with sorted dirnames/filenames
-    for current_dir, dirnames, filenames in os.walk(root, followlinks=False):
+    for current_dir, dirnames, filenames in os.walk(root, followlinks=False, onerror=_on_walk_error):
         cur = Path(current_dir)
         tallies["dirs_seen"] += 1
 
@@ -163,6 +177,7 @@ def discover_files(
             try:
                 st = p.lstat()
             except (FileNotFoundError, PermissionError) as exc:
+                tallies["unreadable"] += 1
                 anomalies.append(
                     Anomaly(
                         path=str(p),
@@ -182,7 +197,22 @@ def discover_files(
             # for file symlinks, allow only if real path remains under root.
             is_symlink = stat.S_ISLNK(st.st_mode)
             if is_symlink:
-                real = p.resolve()
+                try:
+                    real = p.resolve()
+                except Exception:
+                    # If resolve fails (broken link), treat as out-of-root for safety
+                    tallies["symlink_out_of_root"] += 1
+                    anomalies.append(
+                        Anomaly(
+                            path=str(p),
+                            blob_sha256=None,
+                            typ=AnomalyType.SYMLINK_OUT_OF_ROOT,
+                            severity=Severity.ERROR,
+                            reason_detail="Broken symlink or resolve() failed",
+                        )
+                    )
+                    continue
+
                 if not _within_root(real, root):
                     tallies["symlink_out_of_root"] += 1
                     anomalies.append(
@@ -197,6 +227,16 @@ def discover_files(
                     continue
                 else:
                     tallies["symlink_traversed"] += 1
+                    # Audit traversed symlinks as INFO so it shows up in reports
+                    anomalies.append(
+                        Anomaly(
+                            path=str(p),
+                            blob_sha256=None,
+                            typ=AnomalyType.SYMLINK_TRAVERSED,
+                            severity=Severity.INFO,
+                            reason_detail=f"File symlink resolved to {real}",
+                        )
+                    )
 
             # Repo-relative path for globbing
             rel = str(p.relative_to(root))
@@ -212,7 +252,7 @@ def discover_files(
             # Language support
             lang = _guess_language(p)
             if lang is None:
-                # Unsupported: ignore silently but still counted in files_seen
+                tallies["skipped_unsupported"] += 1
                 continue
 
             # Vendor/minified/generated detection
@@ -275,6 +315,38 @@ def discover_files(
                 )
                 continue
 
+            # If included vendor/minified/generated, still audit their presence
+            if is_vendor and opts.include_vendor:
+                anomalies.append(
+                    Anomaly(
+                        path=str(p),
+                        blob_sha256=None,
+                        typ=AnomalyType.VENDORED_CODE,
+                        severity=Severity.INFO,
+                        reason_detail="Included by option: vendor directory match",
+                    )
+                )
+            if is_minified and opts.include_minified:
+                anomalies.append(
+                    Anomaly(
+                        path=str(p),
+                        blob_sha256=None,
+                        typ=AnomalyType.MINIFIED_JS,
+                        severity=Severity.WARN,
+                        reason_detail="Included by option: minified JS heuristic",
+                    )
+                )
+            if is_generated and opts.include_generated:
+                anomalies.append(
+                    Anomaly(
+                        path=str(p),
+                        blob_sha256=None,
+                        typ=AnomalyType.GENERATED_CODE,
+                        severity=Severity.INFO,
+                        reason_detail="Included by option: generated marker near header",
+                    )
+                )
+
             # Content address (optional, True by default)
             blob_sha = sha256_file_chunked(p) if opts.compute_hash else ""
 
@@ -291,7 +363,7 @@ def discover_files(
             tallies["supported"] += 1
             tallies["parse_candidates"] += 1
 
-    # Deterministic order of returned files (absolute path)
+    # Deterministic order of returned files (relative path then blob)
     files.sort(key=lambda f: (f.rel_path, f.blob_sha256))
 
     return DiscoveryResult(files=files, anomalies=anomalies, tallies=tallies)
