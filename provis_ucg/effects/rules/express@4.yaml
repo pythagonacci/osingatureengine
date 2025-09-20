@@ -1,0 +1,18 @@
+name: express@4
+version: "1.0"
+language: javascript
+requires: ["core@1"]
+telemetry_tag: express
+rules:
+  - id: express.app.method
+    effect_kind: http.route
+    provider: express
+    family: app
+    patterns:
+      - { language: javascript, kind: call, object_method: "app.get",  arg_count_min: 1 }
+      - { language: javascript, kind: call, object_method: "app.post", arg_count_min: 1 }
+      - { language: javascript, kind: call, object_method: "app.put",  arg_count_min: 1 }
+      - { language: javascript, kind: call, object_method: "app.delete", arg_count_min: 1 }
+    fields:
+      - { name: method, source: literal, value_expr: "${0}" }  # inferred in engine from preview if missing
+      - { name: path,   source: arg, index: 0 }

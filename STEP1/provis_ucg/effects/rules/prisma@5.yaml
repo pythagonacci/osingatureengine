@@ -1,0 +1,16 @@
+name: prisma@5
+version: "1.0"
+language: typescript
+requires: ["core@1"]
+telemetry_tag: prisma
+rules:
+  - id: prisma.client.findMany
+    effect_kind: db.orm
+    provider: prisma
+    family: client
+    confidence: 0.9
+    patterns:
+      - { language: typescript, kind: call, object_method: "prisma.user.findMany", arg_count_min: 0 }
+    fields:
+      - { name: op,    source: literal, value_expr: "SELECT" }
+      - { name: table, source: literal, value_expr: "user" }

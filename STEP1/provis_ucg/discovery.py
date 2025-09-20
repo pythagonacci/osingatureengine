@@ -33,9 +33,9 @@ from __future__ import annotations
 import fnmatch
 import os
 import stat
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
 
 from .config import (
     DEFAULT_ALLOW_GLOBS,
@@ -45,7 +45,6 @@ from .config import (
 )
 from .hashing import sha256_file_chunked
 from .models import Anomaly, AnomalyType, DiscoveredFile, Language, Severity
-
 
 # ---------- Internal constants ------------------------------------------------
 
@@ -62,7 +61,7 @@ _GENERATED_MARKERS = (
 )
 
 # Supported source file extensions → Language mapping
-_SUPPORTED_EXTS: Dict[str, Language] = {
+_SUPPORTED_EXTS: dict[str, Language] = {
     ".py": Language.PYTHON,
     ".js": Language.JAVASCRIPT,
     ".jsx": Language.JAVASCRIPT,
@@ -72,6 +71,7 @@ _SUPPORTED_EXTS: Dict[str, Language] = {
 
 
 # ---------- Options & result types -------------------------------------------
+
 
 @dataclass(frozen=True)
 class DiscoveryOptions:
@@ -84,28 +84,30 @@ class DiscoveryOptions:
     - max_file_bytes: hard limit per file; oversize files are audited and skipped.
     - compute_hash: compute blob_sha256 content address (True by default).
     """
+
     include_vendor: bool = False
     include_minified: bool = False
     include_generated: bool = False
-    allow_globs: Optional[Iterable[str]] = None
-    deny_globs: Optional[Iterable[str]] = None
+    allow_globs: Iterable[str] | None = None
+    deny_globs: Iterable[str] | None = None
     max_file_bytes: int = MAX_FILE_BYTES
     compute_hash: bool = True
 
 
 @dataclass
 class DiscoveryResult:
-    files: List[DiscoveredFile]
-    anomalies: List[Anomaly]
-    tallies: Dict[str, int]
+    files: list[DiscoveredFile]
+    anomalies: list[Anomaly]
+    tallies: dict[str, int]
 
 
 # ---------- Public API --------------------------------------------------------
 
+
 def discover_files(
     repo_path: str | Path,
     *,
-    options: Optional[DiscoveryOptions] = None,
+    options: DiscoveryOptions | None = None,
 ) -> DiscoveryResult:
     """
     Deterministic, secure file discovery for Step 1 (UCG).
@@ -129,9 +131,9 @@ def discover_files(
     allow_globs = tuple(opts.allow_globs or DEFAULT_ALLOW_GLOBS)
     deny_globs = tuple(opts.deny_globs or DEFAULT_DENY_GLOBS)
 
-    files: List[DiscoveredFile] = []
-    anomalies: List[Anomaly] = []
-    tallies: Dict[str, int] = {
+    files: list[DiscoveredFile] = []
+    anomalies: list[Anomaly] = []
+    tallies: dict[str, int] = {
         "dirs_seen": 0,
         "files_seen": 0,
         "supported": 0,
@@ -152,7 +154,7 @@ def discover_files(
         # Capture directory-level errors deterministically
         anomalies.append(
             Anomaly(
-                path=getattr(err, 'filename', str(root)),
+                path=getattr(err, "filename", str(root)),
                 blob_sha256=None,
                 typ=AnomalyType.PERMISSION_DENIED,
                 severity=Severity.ERROR,
@@ -161,7 +163,9 @@ def discover_files(
         )
 
     # Deterministic traversal: os.walk with sorted dirnames/filenames
-    for current_dir, dirnames, filenames in os.walk(root, followlinks=False, onerror=_on_walk_error):
+    for current_dir, dirnames, filenames in os.walk(
+        root, followlinks=False, onerror=_on_walk_error
+    ):
         cur = Path(current_dir)
         tallies["dirs_seen"] += 1
 
@@ -371,7 +375,8 @@ def discover_files(
 
 # ---------- Helpers -----------------------------------------------------------
 
-def _guess_language(path: Path) -> Optional[Language]:
+
+def _guess_language(path: Path) -> Language | None:
     return _SUPPORTED_EXTS.get(path.suffix.lower())
 
 

@@ -1,0 +1,15 @@
+name: sequelize@6
+version: "1.0"
+language: javascript
+requires: ["core@1"]
+telemetry_tag: sequelize
+rules:
+  - id: seq.model.findAll
+    effect_kind: db.orm
+    provider: sequelize
+    family: model
+    patterns:
+      - { language: javascript, kind: call, object_method: "Model.findAll", arg_count_min: 0 }
+    fields:
+      - { name: op,    source: literal, value_expr: "SELECT" }
+      - { name: table, source: literal, value_expr: "${kw:table}" }  # if query has 'table' kw in preview, else skip

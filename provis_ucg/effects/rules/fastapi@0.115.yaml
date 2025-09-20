@@ -1,0 +1,35 @@
+name: fastapi@0.115
+version: "1.0"
+language: python
+requires: ["core@1"]
+telemetry_tag: fastapi
+rules:
+  - id: fastapi.router.get
+    effect_kind: http.route
+    provider: fastapi
+    family: router
+    patterns:
+      - language: python
+        kind: call
+        callee: "router.get"
+        arg_count_min: 1
+    fields:
+      - { name: method, source: literal, value_expr: "GET" }
+      - { name: path,   source: arg, index: 0 }
+  - id: fastapi.app.post
+    effect_kind: http.route
+    provider: fastapi
+    family: app
+    patterns:
+      - { language: python, kind: call, callee: "app.post", arg_count_min: 1 }
+    fields:
+      - { name: method, source: literal, value_expr: "POST" }
+      - { name: path,   source: arg, index: 0 }
+  - id: fastapi.raw_sql
+    effect_kind: db.sql
+    provider: python
+    family: execute
+    patterns:
+      - { language: python, kind: call, callee: "session.execute", arg_count_min: 1 }
+    fields:
+      - { name: sql, source: arg, index: 0 }

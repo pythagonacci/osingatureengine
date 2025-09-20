@@ -1,11 +1,15 @@
 from __future__ import annotations
+
 from pathlib import Path
-from provis_ucg.discovery import discover_files, DiscoveryOptions
+
+from provis_ucg.discovery import DiscoveryOptions, discover_files
 from provis_ucg.models import AnomalyType, Language
+
 
 def _write(p: Path, text: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text, encoding="utf-8")
+
 
 def test_discovery_supports_basic_langs(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
@@ -25,13 +29,15 @@ def test_discovery_supports_basic_langs(tmp_path: Path) -> None:
     # vendor skipped + anomaly recorded
     assert any(a.typ == AnomalyType.VENDORED_CODE for a in out.anomalies)
 
+
 def test_minified_heuristic_skips_by_default(tmp_path: Path) -> None:
     repo = tmp_path / "r"
     # synthetically long line to trigger heuristic
-    _write(repo / "web" / "bundle.min.js", "var a=" + "1"*5000 + ";\n")
+    _write(repo / "web" / "bundle.min.js", "var a=" + "1" * 5000 + ";\n")
     out = discover_files(repo)
     assert out.tallies["skipped_minified"] == 1
     assert any(a.typ == AnomalyType.MINIFIED_JS for a in out.anomalies)
+
 
 def test_generated_header_skips_by_default(tmp_path: Path) -> None:
     repo = tmp_path / "r"
@@ -39,6 +45,7 @@ def test_generated_header_skips_by_default(tmp_path: Path) -> None:
     out = discover_files(repo)
     assert out.tallies["skipped_generated"] == 1
     assert any(a.typ == AnomalyType.GENERATED_CODE for a in out.anomalies)
+
 
 def test_globs_allow_and_deny(tmp_path: Path) -> None:
     repo = tmp_path / "r"
@@ -52,6 +59,7 @@ def test_globs_allow_and_deny(tmp_path: Path) -> None:
     rels = [f.rel_path for f in out.files]
     assert rels == ["keep/ok.py"]
     assert out.tallies["skipped_not_allowed"] >= 1 or out.tallies["skipped_deny_glob"] >= 1
+
 
 def test_symlink_out_of_root_is_flagged(tmp_path: Path) -> None:
     # create two dirs; symlink from repo to outside

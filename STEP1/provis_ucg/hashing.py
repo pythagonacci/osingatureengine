@@ -1,6 +1,8 @@
 from __future__ import annotations
+
 import hashlib
 from pathlib import Path
+
 
 def sha256_file_chunked(path: Path, chunk_size: int = 1_048_576) -> str:
     h = hashlib.sha256()

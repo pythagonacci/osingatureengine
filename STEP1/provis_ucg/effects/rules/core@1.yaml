@@ -1,0 +1,15 @@
+name: core@1
+version: "1.0"
+language: any
+rules:
+  - id: core.noop
+    effect_kind: meta.core
+    provider: core
+    family: base
+    patterns:
+      - language: any
+        kind: call
+        callee: "__core_noop__"
+        arg_count_min: 0
+    fields: []
+    confidence: 1.0
