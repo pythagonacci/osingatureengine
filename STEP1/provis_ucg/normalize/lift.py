@@ -3,12 +3,13 @@ from __future__ import annotations
 # -----------------------------------------------------------------------------
 # Lift Tree-sitter ParseResult -> Uniform Code Graph (UCG) IR (production-hardened)
 #
-# Key improvements:
-# - Language-aware name & signature extraction (Unicode identifiers, decorators, async, generics)
-# - Stable symbol IDs via normalized signatures: (name, arity, type-seq, flags)
-# - Proper nested scope resolution using interval containment from spans
-# - Nuanced capture mapping (fn/method/ctor/arrow/get/set/async)
-# - Graceful degradation with explicit anomalies; never drop evidence silently
+# This version extends your implementation with:
+# - Grouping of captures into single logical statement nodes (imports/exports/calls)
+# - Caller→Call and Call→Callee placeholder edges
+# - Conservative import alias extraction (JS/TS + Python)
+# - Placeholder Symbol nodes for imported names and callees
+# - Deterministic ordering and richer metrics
+# - No silent drops: WARN anomalies emitted for unknown capture kinds
 # -----------------------------------------------------------------------------
 
 import re
@@ -98,7 +99,6 @@ def _span_key(path: str, b0: int, b1: int) -> str:
 
 # ----------------------------- Capture → semantic kind ------------------------
 
-# We accept multiple variants produced by ts_driver queries.
 CAPTURE_KIND_TO_SEM: Dict[str, Tuple[SemanticType, str]] = {
     # Python
     "def.func":            (SemanticType.FUNCTION, "function"),
@@ -107,7 +107,6 @@ CAPTURE_KIND_TO_SEM: Dict[str, Tuple[SemanticType, str]] = {
     # JS/TS defs
     "def.arrow":           (SemanticType.FUNCTION, "arrow_function"),
     "def.var_func":        (SemanticType.FUNCTION, "function_expression"),
-    # Methods/classes for JS/TS
     "def.method_sig":      (SemanticType.METHOD,   "method_signature"),
     # Calls
     "call.expr":           (SemanticType.CALL,     "call"),
@@ -121,6 +120,9 @@ CAPTURE_KIND_TO_SEM: Dict[str, Tuple[SemanticType, str]] = {
     "import.from":         (SemanticType.IMPORT,   "import_from"),
     "import.module":       (SemanticType.SYMBOL,   "import_module"),
     "import.source":       (SemanticType.SYMBOL,   "import_source"),
+    "import.named":        (SemanticType.SYMBOL,   "import_named"),
+    "import.default":      (SemanticType.SYMBOL,   "import_default"),
+    "import.alias":        (SemanticType.SYMBOL,   "import_alias"),
     "export.stmt":         (SemanticType.EXPORT,   "export"),
     # Literals/templates
     "lit.string":          (SemanticType.LITERAL,        "string"),
@@ -129,23 +131,19 @@ CAPTURE_KIND_TO_SEM: Dict[str, Tuple[SemanticType, str]] = {
 
 # ----------------------------- Identifier patterns ----------------------------
 
-# Unicode-aware identifier: start with letter/_/$, then letters/digits/_/$ (keep conservative)
-_ID_START = r"[^\W\d_]|_|$"  # any unicode letter OR underscore OR $
-_ID_CONT  = r"[^\W_]|_|$|\d" # letter/digit/underscore/$
+_ID_START = r"[^\W\d_]|_|$"
+_ID_CONT  = r"[^\W_]|_|$|\d"
 IDENT_RE  = re.compile(fr"({_ID_START})(({_ID_CONT})*)", re.UNICODE)
 
 # ----------------------------- Signature normalization ------------------------
 
 @dataclass(frozen=True)
 class SigNorm:
-    """Normalized signature for stable symbol identity."""
     name: str
     arity: int
-    types: Tuple[str, ...]        # language-normalized type tokens (optional)
-    flags: Tuple[str, ...]        # e.g., ('async', 'getter', 'setter', 'static', 'ctor')
-
+    types: Tuple[str, ...]
+    flags: Tuple[str, ...]
     def as_str(self) -> str:
-        # Avoid param names; include arity + coarse type sequence + flags (sorted for determinism)
         types_str = ",".join(self.types) if self.types else ""
         flags_str = ",".join(sorted(self.flags)) if self.flags else ""
         return f"{self.name}({self.arity})|{types_str}|{flags_str}"
@@ -154,13 +152,13 @@ class SigNorm:
 
 @dataclass
 class DefSite:
-    sem: SemanticType                # CLASS / FUNCTION / METHOD
+    sem: SemanticType
     raw_kind: str
     name: Optional[str]
     span: Span
     sig: Optional[SigNorm]
-    parent_idx: Optional[int] = None # index into defs[] for enclosing definition
-    qname: Optional[str] = None      # qualified name after tree build
+    parent_idx: Optional[int] = None
+    qname: Optional[str] = None
     node_id: Optional[str] = None
     symbol_id: Optional[str] = None
 
@@ -168,7 +166,6 @@ def _encloses(outer: Span, inner: Span) -> bool:
     return (outer.byte_start <= inner.byte_start) and (outer.byte_end >= inner.byte_end)
 
 def _build_scope_tree(defs: List[DefSite]) -> None:
-    # Sort by (start, -end) to ensure parents come before children for equal starts
     order = sorted(range(len(defs)), key=lambda i: (defs[i].span.byte_start, -defs[i].span.byte_end))
     stack: List[int] = []
     for i in order:
@@ -194,15 +191,12 @@ def _qname_chain(module_qname: str, defs: List[DefSite], idx: Optional[int], lea
 def _strip_decorators_and_leading_markers(s: str, language: Language) -> str:
     lines = s.splitlines()
     out = []
-    skip = True
     for ln in lines:
         if language == Language.PYTHON and ln.lstrip().startswith("@"):
-            continue  # decorator
-        # first non-decorator line flips skip
+            continue
         out.append(ln)
         if ln.strip():
             break
-    # Trim leading async/def/class/exports/etc. markers loosely; callers handle specifics
     return "\n".join(out)
 
 def _first_identifier(s: str) -> Optional[str]:
@@ -210,51 +204,33 @@ def _first_identifier(s: str) -> Optional[str]:
     return m.group(0) if m else None
 
 def _extract_py_def(s: str) -> Tuple[Optional[str], int, Tuple[str, ...], Tuple[str, ...]]:
-    """
-    Extract (name, arity, types, flags) from a Python def/method/class preview.
-    Types are coarse (from annotations if visible); arity counts parameters excluding 'self'/'cls'.
-    Flags may include 'async', 'ctor'.
-    """
     flags: List[str] = []
     ss = s.strip()
     if ss.startswith("async"):
         flags.append("async")
         ss = ss[5:].lstrip()
-
     if ss.startswith("def "):
-        # def name(params) -> type:
         after = ss[4:]
         name = _first_identifier(after)
         if not name:
             return None, 0, (), tuple(flags)
-        # find param list
         params = _slice_parens(after, opener="(", closer=")")
         arity, types = _normalize_param_list_python(params)
         return name, arity, types, tuple(flags)
-
     if ss.startswith("class "):
         after = ss[6:]
         name = _first_identifier(after)
         if not name:
             return None, 0, (), tuple(flags)
-        # ctor signature is not on class preview; treat as class symbol
         flags.append("class")
         return name, 0, (), tuple(flags)
-
-    # Fallback: property/getter-like?
     name = _first_identifier(ss)
     return (name, 0, (), tuple(flags)) if name else (None, 0, (), tuple(flags))
 
 def _normalize_param_list_python(param_block: Optional[str]) -> Tuple[int, Tuple[str, ...]]:
-    """
-    param_block like "(self, x: List[int], *, y: str = 'a', **kw) -> T"
-    returns (arity_without_selfcls, ('List', 'str', '*', '**', ...))
-    """
     if not param_block:
         return 0, ()
-    # Strip outer parens
     inner = param_block.strip()[1:-1] if param_block.startswith("(") else param_block
-    # Remove annotations default values roughly; split on commas respecting nesting
     parts = _split_top_level(inner, sep=",")
     types: List[str] = []
     arity = 0
@@ -265,134 +241,85 @@ def _normalize_param_list_python(param_block: Optional[str]) -> Tuple[int, Tuple
         if t.startswith("self") or t.startswith("cls"):
             continue
         if t.startswith("**"):
-            types.append("**")
-            arity += 1
-            continue
+            types.append("**"); arity += 1; continue
         if t.startswith("*"):
-            types.append("*")
-            # varargs counts as one
-            arity += 1
-            continue
-        # annotation: name: Type
+            types.append("*"); arity += 1; continue
         typ = None
         if ":" in t:
             typ = t.split(":", 1)[1].strip()
-        if typ:
-            # keep only coarse type tokens (cap first identifier/Identifier[]/Dict/Optional)
-            types.append(_coarse_type_token(typ))
-        else:
-            types.append("?")
+        types.append(_coarse_type_token(typ) if typ else "?")
         arity += 1
-    # return type is not counted in params
-    return arity, tuple(types[:32])  # cap
+    return arity, tuple(types[:32])
 
 def _extract_ts_js_def(s: str) -> Tuple[Optional[str], int, Tuple[str, ...], Tuple[str, ...]]:
-    """
-    Extract (name, arity, types, flags) from TS/JS function/method/class/arrow preview.
-    """
     ss = s.strip()
     flags: List[str] = []
-    # getters/setters
     if ss.startswith("get "):
-        flags.append("getter")
-        ss = ss[4:].lstrip()
+        flags.append("getter"); ss = ss[4:].lstrip()
     if ss.startswith("set "):
-        flags.append("setter")
-        ss = ss[4:].lstrip()
+        flags.append("setter"); ss = ss[4:].lstrip()
     if ss.startswith("async "):
-        flags.append("async")
-        ss = ss[6:].lstrip()
-
-    # class
+        flags.append("async"); ss = ss[6:].lstrip()
     if ss.startswith("class "):
         nm = _first_identifier(ss[6:])
-        return nm, 0, (), tuple(flags + ["class"]) if nm else (None, 0, (), tuple(flags))
-
-    # function <T>(...) name may appear before/after; try to grab identifier nearest to '('
+        return nm, 0, (), tuple(flags + (["class"] if nm else []))
     name = _first_identifier(ss)
-    # Arrow functions often appear as "identifier = (...)" or "const name = (...) =>"
-    # Try pattern: identifier '=' '('
     m = re.search(rf"({IDENT_RE.pattern})\s*=\s*\(", ss)
     if m and "=>" in ss:
         nm = m.group(1)
         params = _slice_parens(ss[m.end()-1:], opener="(", closer=")")
         arity, types = _normalize_param_list_ts(params)
         return nm, arity, types, tuple(flags + ["arrow"])
-
-    # Regular function / method declaration: name(...) or <T>(...) name?
-    # Find the first identifier followed by '(' somewhere later
     if name:
         idx = ss.find(name)
         after_nm = ss[idx + len(name):]
         params = _slice_parens(after_nm, opener="(", closer=")")
         arity, types = _normalize_param_list_ts(params)
         return name, arity, types, tuple(flags)
-
     return None, 0, (), tuple(flags)
 
 def _slice_parens(s: str, opener: str, closer: str) -> Optional[str]:
-    """Return substring including balanced parens from the first opener; None if not found."""
     i = s.find(opener)
-    if i < 0:
-        return None
+    if i < 0: return None
     depth = 0
     for j, ch in enumerate(s[i:], start=i):
-        if ch == opener:
-            depth += 1
+        if ch == opener: depth += 1
         elif ch == closer:
             depth -= 1
-            if depth == 0:
-                return s[i:j+1]
+            if depth == 0: return s[i:j+1]
     return None
 
 def _split_top_level(s: str, sep: str = ",") -> List[str]:
     out: List[str] = []
-    depth = 0
-    cur = []
+    depth = 0; cur = []
     for ch in s:
-        if ch in "([{<":
-            depth += 1
-        elif ch in ")]}>":
-            depth = max(0, depth - 1)
+        if ch in "([{<": depth += 1
+        elif ch in ")]}>": depth = max(0, depth - 1)
         if ch == sep and depth == 0:
-            out.append("".join(cur))
-            cur = []
+            out.append("".join(cur)); cur = []
         else:
             cur.append(ch)
     out.append("".join(cur))
     return out
 
-def _coarse_type_token(t: str) -> str:
-    # For TS: strip generics and module paths; for Py: keep base identifier
-    t = t.strip()
-    # remove generic payload <...>
-    while "<" in t and ">" in t:
-        t = re.sub(r"<[^<>]*>", "", t)
-    # remove array suffixes and | unions compressively
-    t = t.replace("[]", "[]")
-    # keep first identifier-like token
-    m = IDENT_RE.search(t)
+def _coarse_type_token(t: Optional[str]) -> str:
+    if not t: return "?"
+    x = t.strip()
+    while "<" in x and ">" in x:
+        x = re.sub(r"<[^<>]*>", "", x)
+    m = IDENT_RE.search(x)
     return m.group(0) if m else "?"
 
 def _normalize_param_list_ts(param_block: Optional[str]) -> Tuple[int, Tuple[str, ...]]:
-    if not param_block:
-        return 0, ()
+    if not param_block: return 0, ()
     inner = param_block.strip()[1:-1] if param_block.startswith("(") else param_block
     parts = _split_top_level(inner, ",")
-    arity = 0
-    types: List[str] = []
+    arity = 0; types: List[str] = []
     for p in parts:
         t = p.strip()
-        if not t:
-            continue
-        # Drop default values and param names; keep type annotation after ':'
-        typ = None
-        if ":" in t:
-            typ = t.split(":", 1)[1].strip()
-        if typ:
-            types.append(_coarse_type_token(typ))
-        else:
-            types.append("?")
+        if not t: continue
+        typ = t.split(":", 1)[1].strip() if ":" in t else None
+        types.append(_coarse_type_token(typ))
         arity += 1
     return arity, tuple(types[:32])
 
@@ -427,49 +354,42 @@ def lift_to_ucg(
     module_node_id = _node_id(SemanticType.MODULE, language, module_qname, _span_key(abs_path, 0, 0))
 
     file_node = UCGNode(
-        node_id=file_node_id,
-        semantic_type=SemanticType.FILE,
-        raw_type="file",
-        name=Path(abs_path).name,
-        qualified_name=abs_path,
-        language=language,
+        node_id=file_node_id, semantic_type=SemanticType.FILE, raw_type="file",
+        name=Path(abs_path).name, qualified_name=abs_path, language=language,
         spans=[Span(abs_path, 0, 0, 0, 0, 0, 0, "seed:file")],
         extra={"blob_sha256": blob_sha},
     )
     module_node = UCGNode(
-        node_id=module_node_id,
-        semantic_type=SemanticType.MODULE,
-        raw_type="module",
-        name=module_qname,
-        qualified_name=module_qname,
-        language=language,
+        node_id=module_node_id, semantic_type=SemanticType.MODULE, raw_type="module",
+        name=module_qname, qualified_name=module_qname, language=language,
         spans=[Span(abs_path, 0, 0, 0, 0, 0, 0, "seed:module")],
         extra={"blob_sha256": blob_sha},
     )
     nodes.extend([file_node, module_node])
     edges.append(_mk_edge("defines", file_node_id, module_node_id, Span(abs_path, 0, 0, 0, 0, 0, 0, "seed:defines")))
 
-    # 1) First pass: collect candidate def sites with conservative name + signature
+    # 1) Collect def sites
     def_sites: List[DefSite] = []
+    unknown_count = 0
     for cap in parse.captures:
         sem_map = CAPTURE_KIND_TO_SEM.get(cap.kind)
         if not sem_map:
+            unknown_count += 1
             anomalies.append(Anomaly(path=abs_path, blob_sha256=blob_sha,
-                                     typ=AnomalyType.PARTIAL_PARSE, severity=Severity.INFO,
+                                     typ=AnomalyType.PARTIAL_PARSE, severity=Severity.WARN,
                                      reason_detail=f"Unknown capture kind: {cap.kind}"))
             continue
         sem, raw_kind = sem_map
         if sem not in (SemanticType.CLASS, SemanticType.FUNCTION, SemanticType.METHOD):
             continue
-
         sp = _cap_span(abs_path, cap)
         name, sig = _extract_name_and_sig(language, sem, cap.text_preview or "")
         def_sites.append(DefSite(sem=sem, raw_kind=raw_kind, name=name, span=sp, sig=sig))
 
-    # 2) Build scope tree by interval containment so methods/inner functions attach to nearest parent
+    # 2) Scope tree (nested containment)
     _build_scope_tree(def_sites)
 
-    # 3) Create nodes for defs with qualified names based on the scope tree
+    # 3) Materialize def nodes + symbol nodes
     for i, d in enumerate(def_sites):
         leaf = d.name or "<anonymous>"
         qname = _qname_chain(module_qname, def_sites, d.parent_idx, leaf) if d.parent_idx is not None \
@@ -483,76 +403,138 @@ def lift_to_ucg(
         sid = _sym_id(language, qname, d.raw_kind, sig_norm)
         d.symbol_id = sid
 
-        # Emit def node
         nodes.append(UCGNode(
-            node_id=nid,
-            semantic_type=d.sem,
-            raw_type=d.raw_kind,
-            name=d.name,
-            qualified_name=qname,
-            language=language,
-            spans=[d.span],
-            extra={"symbol_id": sid, "signature": sig_norm},
+            node_id=nid, semantic_type=d.sem, raw_type=d.raw_kind,
+            name=d.name, qualified_name=qname, language=language,
+            spans=[d.span], extra={"symbol_id": sid, "signature": sig_norm},
         ))
-        # Module defines node
         edges.append(_mk_edge("defines", module_node_id, nid, d.span))
-        # Node defines its symbol (keeps symbol lookup simple)
         sym_node = UCGNode(
-            node_id=sid,
-            semantic_type=SemanticType.SYMBOL,
-            raw_type="symbol",
-            name=d.name,
-            qualified_name=qname,
-            language=language,
-            spans=[d.span],
-            extra={},
+            node_id=sid, semantic_type=SemanticType.SYMBOL, raw_type="symbol",
+            name=d.name, qualified_name=qname, language=language,
+            spans=[d.span], extra={},
         )
         symbols.append(sym_node)
         edges.append(_mk_edge("defines", nid, sid, d.span))
 
-    # 4) Non-def captures -> nodes
-    for cap in parse.captures:
-        sem_map = CAPTURE_KIND_TO_SEM.get(cap.kind)
-        if not sem_map:
-            continue
-        sem, raw_kind = sem_map
-        if sem in (SemanticType.CLASS, SemanticType.FUNCTION, SemanticType.METHOD):
-            continue  # already handled
+    # Build index for caller lookup
+    decl_spans = sorted([(d.span, d.node_id) for d in def_sites], key=lambda x: (x[0].byte_start, -x[0].byte_end))
 
-        sp = _cap_span(abs_path, cap)
-        span_key = _span_key(abs_path, cap.byte_start, cap.byte_end)
+    # 4) Group & materialize IMPORT/EXPORT/CALL + placeholders
+    import_caps: List[Capture] = [c for c in parse.captures if CAPTURE_KIND_TO_SEM.get(c.kind, (None, ""))[0] == SemanticType.IMPORT]
+    export_caps: List[Capture] = [c for c in parse.captures if CAPTURE_KIND_TO_SEM.get(c.kind, (None, ""))[0] == SemanticType.EXPORT]
+    call_caps:   List[Capture] = [c for c in parse.captures if CAPTURE_KIND_TO_SEM.get(c.kind, (None, ""))[0] == SemanticType.CALL]
+    sym_caps:    List[Capture] = [c for c in parse.captures if CAPTURE_KIND_TO_SEM.get(c.kind, (None, ""))[0] == SemanticType.SYMBOL]
+    lit_caps:    List[Capture] = [c for c in parse.captures if CAPTURE_KIND_TO_SEM.get(c.kind, (None, ""))[0] in (SemanticType.LITERAL, SemanticType.TEMPLATE_PART)]
 
-        if sem == SemanticType.CALL:
-            q = f"{module_qname}::call@{cap.byte_start}"
-            nid = _node_id(SemanticType.CALL, language, q, span_key)
-            nodes.append(UCGNode(
-                node_id=nid, semantic_type=SemanticType.CALL, raw_type=raw_kind,
-                name=None, qualified_name=q, language=language, spans=[sp],
-                extra={"preview": cap.text_preview}
-            ))
-            edges.append(_mk_edge("defines", module_node_id, nid, sp))
-            continue
+    # Group helpers
+    def _group(caps: List[Capture]) -> List[Tuple[Span, List[Capture]]]:
+        if not caps: return []
+        cs = sorted(caps, key=lambda c: (c.byte_start, c.byte_end))
+        groups: List[Tuple[Span, List[Capture]]] = []
+        buf: List[Capture] = []
+        b0 = b1 = None
+        for c in cs:
+            if not buf:
+                buf = [c]; b0, b1 = c.byte_start, c.byte_end; continue
+            if c.byte_start <= b1:  # overlap → same statement
+                buf.append(c); b1 = max(b1, c.byte_end)
+            else:
+                groups.append((Span(abs_path, b0, b1, buf[0].line_start, buf[0].col_start, buf[-1].line_end, buf[-1].col_end, "group"), buf))
+                buf = [c]; b0, b1 = c.byte_start, c.byte_end
+        if buf:
+            groups.append((Span(abs_path, b0, b1, buf[0].line_start, buf[0].col_start, buf[-1].line_end, buf[-1].col_end, "group"), buf))
+        return groups
 
-        if sem in (SemanticType.IMPORT, SemanticType.EXPORT, SemanticType.LITERAL, SemanticType.TEMPLATE_PART):
-            q = f"{module_qname}::{sem.value.lower()}@{cap.byte_start}"
-            nid = _node_id(sem, language, q, span_key)
-            nodes.append(UCGNode(
-                node_id=nid, semantic_type=sem, raw_type=raw_kind,
-                name=None, qualified_name=q, language=language, spans=[sp],
-                extra={"preview": cap.text_preview}
-            ))
-            edges.append(_mk_edge("defines", module_node_id, nid, sp))
-            continue
-
-        # SYMBOL & everything else → create a symbol occurrence (placeholder)
-        name = _first_identifier(cap.text_preview or "") or f"sym@{cap.byte_start}"
-        q = f"{module_qname}::{name}"
-        sid = _sym_id(language, q, "symbol", name)
+    # Imports
+    for gspan, gcaps in _group(import_caps + [c for c in sym_caps if c.kind.startswith("import.")]):
+        span_key = _span_key(abs_path, gspan.byte_start, gspan.byte_end)
+        q = f"{module_qname}::import@{gspan.byte_start}"
+        import_id = _node_id(SemanticType.IMPORT, language, q, span_key)
         nodes.append(UCGNode(
-            node_id=sid, semantic_type=SemanticType.SYMBOL, raw_type="symbol",
-            name=name, qualified_name=q, language=language, spans=[sp], extra={}
+            node_id=import_id, semantic_type=SemanticType.IMPORT, raw_type=";".join(sorted({c.kind for c in gcaps})),
+            name=None, qualified_name=q, language=language, spans=[gspan],
+            extra={"previews": [c.text_preview for c in gcaps if c.text_preview]},
         ))
-        # Do not attach defines edge from Module for symbol occurrences; binding pass will connect.
+        edges.append(_mk_edge("defines", module_node_id, import_id, gspan))
+
+        # Infer alias names and create placeholder symbols; wire import → symbol (UNRESOLVED)
+        for alias in _infer_import_aliases(gcaps, language):
+            sym_q = f"{module_qname}::{alias}"
+            sid = _sym_id(language, sym_q, "import", alias)
+            sym_node = UCGNode(
+                node_id=sid, semantic_type=SemanticType.SYMBOL, raw_type="import.symbol",
+                name=alias, qualified_name=sym_q, language=language, spans=[gspan], extra={},
+            )
+            symbols.append(sym_node)
+            edges.append(UCGEdge(
+                edge_id=_edge_id("imports", import_id, sid, span_key),
+                kind="imports", src_id=import_id, dst_id=sid,
+                flags=["UNRESOLVED"], confidence=0.4, spans=[gspan], reason_label="normalize:import.binds",
+            ))
+
+    # Exports
+    for gspan, gcaps in _group(export_caps):
+        span_key = _span_key(abs_path, gspan.byte_start, gspan.byte_end)
+        q = f"{module_qname}::export@{gspan.byte_start}"
+        export_id = _node_id(SemanticType.EXPORT, language, q, span_key)
+        nodes.append(UCGNode(
+            node_id=export_id, semantic_type=SemanticType.EXPORT, raw_type=";".join(sorted({c.kind for c in gcaps})),
+            name=None, qualified_name=q, language=language, spans=[gspan],
+            extra={"previews": [c.text_preview for c in gcaps if c.text_preview]},
+        ))
+        edges.append(_mk_edge("defines", module_node_id, export_id, gspan))
+
+    # Calls (group call.* + their nearby symbol captures)
+    for gspan, gcaps in _group(call_caps + [c for c in sym_caps if c.kind.startswith("call.")]):
+        span_key = _span_key(abs_path, gspan.byte_start, gspan.byte_end)
+        q = f"{module_qname}::call@{gspan.byte_start}"
+        call_id = _node_id(SemanticType.CALL, language, q, span_key)
+        nodes.append(UCGNode(
+            node_id=call_id, semantic_type=SemanticType.CALL, raw_type=";".join(sorted({c.kind for c in gcaps})),
+            name=None, qualified_name=q, language=language, spans=[gspan],
+            extra={"previews": [c.text_preview for c in gcaps if c.text_preview]},
+        ))
+        edges.append(_mk_edge("defines", module_node_id, call_id, gspan))
+
+        # Caller: nearest enclosing def by containment
+        caller = _nearest_enclosing_decl(decl_spans, gspan.byte_start, gspan.byte_end)
+        if caller:
+            edges.append(UCGEdge(
+                edge_id=_edge_id("calls", caller, call_id, span_key),
+                kind="calls", src_id=caller, dst_id=call_id,
+                flags=["RESOLVED"], confidence=1.0, spans=[gspan], reason_label="normalize:callsite",
+            ))
+
+        # Callee placeholder symbol from previews
+        callee_name = _infer_callee_name_from_group(gcaps)
+        if callee_name:
+            sym_q = callee_name  # raw; binding will resolve to qname later
+            sid = _sym_id(language, sym_q, "symbol.ref", "")
+            sym_node = UCGNode(
+                node_id=sid, semantic_type=SemanticType.SYMBOL, raw_type="symbol.ref",
+                name=callee_name, qualified_name=sym_q, language=language, spans=[gspan], extra={},
+            )
+            symbols.append(sym_node)
+            edges.append(UCGEdge(
+                edge_id=_edge_id("calls", call_id, sid, span_key),
+                kind="calls", src_id=call_id, dst_id=sid,
+                flags=["UNRESOLVED"], confidence=0.5, spans=[gspan], reason_label="normalize:callee",
+            ))
+
+    # Literals/templates
+    for c in lit_caps:
+        sp = _cap_span(abs_path, c)
+        span_key = _span_key(abs_path, c.byte_start, c.byte_end)
+        sem, raw = CAPTURE_KIND_TO_SEM.get(c.kind, (SemanticType.LITERAL, "literal"))
+        q = f"{module_qname}::{sem.value.lower()}@{c.byte_start}"
+        nid = _node_id(sem, language, q, span_key)
+        nodes.append(UCGNode(
+            node_id=nid, semantic_type=sem, raw_type=raw,
+            name=None, qualified_name=q, language=language, spans=[sp],
+            extra={"preview": c.text_preview},
+        ))
+        edges.append(_mk_edge("defines", module_node_id, nid, sp))
 
     # 5) Sanity anomalies
     if not parse.captures and parse.metrics.node_count > 0:
@@ -562,13 +544,18 @@ def lift_to_ucg(
             reason_detail="AST present but no captures; check queries/grammar pin."
         ))
 
+    # Deterministic ordering
+    nodes.sort(key=lambda n: (n.language.value, n.semantic_type.value, n.qualified_name or "", n.spans[0].byte_start))
+    symbols.sort(key=lambda n: (n.qualified_name or "", n.spans[0].byte_start))
+    edges.sort(key=lambda e: (e.kind, e.src_id, e.dst_id, e.spans[0].byte_start))
+
     metrics = {
-        "defs": sum(1 for d in def_sites),
-        "calls": sum(1 for c in parse.captures if CAPTURE_KIND_TO_SEM.get(c.kind, (None, ""))[0] == SemanticType.CALL),
-        "imports": sum(1 for c in parse.captures if CAPTURE_KIND_TO_SEM.get(c.kind, (None, ""))[0] == SemanticType.IMPORT),
-        "exports": sum(1 for c in parse.captures if CAPTURE_KIND_TO_SEM.get(c.kind, (None, ""))[0] == SemanticType.EXPORT),
-        "literals": sum(1 for c in parse.captures if CAPTURE_KIND_TO_SEM.get(c.kind, (None, ""))[0] in (SemanticType.LITERAL, SemanticType.TEMPLATE_PART)),
-        "unknown_captures": sum(1 for c in parse.captures if CAPTURE_KIND_TO_SEM.get(c.kind) is None),
+        "defs": len(def_sites),
+        "calls": len(call_caps),
+        "imports": len(import_caps),
+        "exports": len(export_caps),
+        "literals": len(lit_caps),
+        "unknown_captures": unknown_count,
         "node_count": parse.metrics.node_count,
         "parse_time_ms": parse.metrics.parse_time_ms,
     }
@@ -589,13 +576,9 @@ def _cap_span(path: str, cap: Capture) -> Span:
 def _mk_edge(kind: str, src: str, dst: str, span: Span) -> UCGEdge:
     return UCGEdge(
         edge_id=_edge_id(kind, src, dst, _span_key(span.path, span.byte_start, span.byte_end)),
-        kind=kind,
-        src_id=src,
-        dst_id=dst,
-        flags=["RESOLVED"],
-        confidence=1.0,
-        spans=[span],
-        reason_label=span.reason_label,
+        kind=kind, src_id=src, dst_id=dst,
+        flags=["RESOLVED"], confidence=1.0,
+        spans=[span], reason_label=span.reason_label,
     )
 
 def _infer_module_qname(path: str, module_root: Optional[str]) -> str:
@@ -610,24 +593,93 @@ def _infer_module_qname(path: str, module_root: Optional[str]) -> str:
     return p.as_posix()
 
 def _extract_name_and_sig(language: Language, sem: SemanticType, preview: str) -> Tuple[Optional[str], Optional[SigNorm]]:
-    """
-    Robust, language-aware extraction. Works from previews (span slices) produced by ts_driver.
-    Never throws: returns (name, SigNorm|None). Missing info yields conservative SigNorm.
-    """
     s = _strip_decorators_and_leading_markers(preview or "", language)
     if language == Language.PYTHON:
         nm, ar, tys, flags = _extract_py_def(s)
         if sem == SemanticType.METHOD and nm in ("__init__",):
             flags = tuple(sorted(set(flags) | {"ctor"}))
-        if nm:
-            return nm, SigNorm(nm, ar, tys, flags)
-        return None, None
-
-    # TS / JS
+        return (nm, SigNorm(nm, ar, tys, flags)) if nm else (None, None)
     nm, ar, tys, flags = _extract_ts_js_def(s)
-    if nm:
-        if sem == SemanticType.METHOD and "getter" in flags:
-            # getter has 0-arity; keep distinct flag
-            pass
-        return nm, SigNorm(nm, ar, tys, flags)
-    return None, None
+    return (nm, SigNorm(nm, ar, tys, flags)) if nm else (None, None)
+
+# --------- New helpers: grouping, caller lookup, import/callee inference ------
+
+def _nearest_enclosing_decl(decl_spans: List[Tuple[Span, str]], b0: int, b1: int) -> Optional[str]:
+    # decl_spans sorted by start asc, end desc
+    best: Optional[Tuple[int, str]] = None  # (area, node_id)
+    for sp, nid in decl_spans:
+        if sp.byte_start <= b0 and b1 <= sp.byte_end:
+            area = sp.byte_end - sp.byte_start
+            if best is None or area < best[0]:
+                best = (area, nid)
+    return best[1] if best else None
+
+def _infer_import_aliases(caps: List[Capture], language: Language) -> List[str]:
+    previews = " ".join(c.text_preview or "" for c in caps)
+    previews = " ".join(previews.split())
+    out: List[str] = []
+
+    if language in (Language.JAVASCRIPT, Language.TYPESCRIPT):
+        # default: import Foo from 'x'
+        m = re.search(r"\bimport\s+([A-Za-z0-9_$]+)\s+from\b", previews)
+        if m: out.append(m.group(1))
+        # named: import { A as B, C } from 'x'
+        brace = re.search(r"\{([^}]*)\}", previews)
+        if brace:
+            inside = brace.group(1)
+            for part in _split_top_level(inside, ","):
+                t = part.strip()
+                if not t: continue
+                if " as " in t:
+                    out.append(t.split(" as ", 1)[1].strip())
+                else:
+                    out.append(t.split()[0].strip())
+    elif language == Language.PYTHON:
+        # from pkg import a as b, c
+        m = re.search(r"\bfrom\b.+\bimport\b(.+)", previews)
+        if m:
+            tail = m.group(1)
+            for part in _split_top_level(tail, ","):
+                t = part.strip()
+                if not t: continue
+                if " as " in t:
+                    out.append(t.split(" as ", 1)[1].strip())
+                else:
+                    out.append(t.split()[0].strip())
+        # import os, sys as s
+        elif previews.strip().startswith("import "):
+            tail = previews.strip()[len("import "):]
+            for part in _split_top_level(tail, ","):
+                t = part.strip()
+                if not t: continue
+                if " as " in t:
+                    out.append(t.split(" as ", 1)[1].strip())
+                else:
+                    out.append(t.split(".", 1)[0].strip())
+
+    # de-dupe stable
+    seen = set(); uniq: List[str] = []
+    for n in out:
+        n2 = _sanitize_ident(n)
+        if n2 and n2 not in seen:
+            seen.add(n2); uniq.append(n2)
+    return uniq
+
+def _infer_callee_name_from_group(caps: List[Capture]) -> Optional[str]:
+    # Prefer more specific captures
+    byk = {c.kind: c for c in caps}
+    for k in ("call.method", "call.func", "call.constructor", "call.callee"):
+        c = byk.get(k)
+        if c and c.text_preview:
+            return _sanitize_ident(c.text_preview)
+    # fallback to any token in previews
+    for c in caps:
+        if c.text_preview:
+            ident = _sanitize_ident(c.text_preview)
+            if ident: return ident
+    return None
+
+def _sanitize_ident(s: str) -> str:
+    m = IDENT_RE.search(s)
+    return m.group(0) if m else ""
+
