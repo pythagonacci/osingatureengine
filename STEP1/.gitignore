@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.uv/
+.pytest_cache/
+.mypy_cache/
+
+# Node
+node_sidecar/node_modules/
+
+# OS / IDE
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# DuckDB / artifacts
+*.duckdb
+*.duckdb_wal
+artifacts/
+.traces/
+
+# Coverage
+htmlcov/
+.coverage*
